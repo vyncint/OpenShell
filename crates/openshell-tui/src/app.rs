@@ -2307,6 +2307,7 @@ impl App {
                                     &mut form.config_value_input,
                                 ) {
                                     form.key_field = ProviderKeyField::ConfigKeyName;
+                                    form.config_cursor = form.config.len().saturating_sub(1_usize);
                                 } else if form.config_key_input.is_empty()
                                     && form.config_value_input.is_empty()
                                 {
@@ -2360,6 +2361,7 @@ impl App {
                                     &mut form.config_value_input,
                                 ) {
                                     form.key_field = ProviderKeyField::ConfigKeyName;
+                                    form.config_cursor = form.config.len().saturating_sub(1_usize);
                                 } else if form.config_key_input.is_empty()
                                     && form.config_value_input.is_empty()
                                 {
@@ -2488,6 +2490,7 @@ impl App {
                                 &mut form.config_value_input,
                             ) {
                                 form.key_field = ProviderKeyField::ConfigKeyName;
+                                form.config_cursor = form.config.len().saturating_sub(1_usize);
                             }
                         }
                         _ => {
@@ -2698,6 +2701,7 @@ impl App {
                         &mut form.config_value_input,
                     ) {
                         form.focus = UpdateProviderField::ConfigKey;
+                        form.config_cursor = form.config.len().saturating_sub(1_usize);
                     } else if form.config_key_input.is_empty() && form.config_value_input.is_empty()
                     {
                         form.focus = UpdateProviderField::Submit;
@@ -2783,6 +2787,7 @@ impl App {
                             &mut form.config_value_input,
                         ) {
                             form.focus = UpdateProviderField::ConfigKey;
+                            form.config_cursor = form.config.len().saturating_sub(1_usize);
                         }
                     }
                     _ => {
