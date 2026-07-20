@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Network rules panel for the sandbox screen.
+//! Policy proposal inbox for the sandbox screen.
 
 use crate::app::App;
 use openshell_core::proto::{L7Allow, L7DenyRule, L7QueryMatcher, NetworkEndpoint, PolicyChunk};
@@ -13,7 +13,7 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
 use super::centered_rect;
 
-/// Draw the network rules panel (list view with highlight bar).
+/// Draw the policy proposal inbox (list view with highlight bar).
 pub fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let t = &app.theme;
     let pending_count = app
@@ -24,12 +24,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     let title = if pending_count > 0 {
         Line::from(vec![
-            Span::styled(" Network Rules ", t.heading),
+            Span::styled(" Policy Proposal Inbox ", t.heading),
             Span::styled(format!(" {pending_count} pending "), t.badge),
             Span::raw(" "),
         ])
     } else {
-        Line::from(Span::styled(" Network Rules ", t.heading))
+        Line::from(Span::styled(" Policy Proposal Inbox ", t.heading))
     };
 
     let mut block = Block::default()
@@ -50,8 +50,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     if app.draft_chunks.is_empty() {
         let msg = Paragraph::new(
-            "No network rules yet. Denied connections will \
-             generate rules automatically.",
+            "No policy proposals yet. Denied connections or sandboxed agents can create \
+             proposals for review.",
         )
         .block(block)
         .style(t.muted);
@@ -121,7 +121,31 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .map(format_endpoint_summary)
                 .unwrap_or_default();
 
-            spans.push(Span::styled(&chunk.rule_name, name_style));
+            spans.push(Span::styled(proposal_headline(chunk), name_style));
+
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(format!("[{}]", chunk.status), status_style));
+
+            if let Some(validation) = validation_badge(chunk) {
+                let validation_style = match validation.kind {
+                    ValidationBadgeKind::Clear => t.status_ok,
+                    ValidationBadgeKind::Review => t.status_warn,
+                };
+                spans.push(Span::styled("  ", t.muted));
+                spans.push(Span::styled(
+                    format!("[{}]", validation.short_label),
+                    validation_style,
+                ));
+            }
+
+            if let Some(warning) = proposal_scope_warning(chunk) {
+                spans.push(Span::styled("  ", t.muted));
+                spans.push(Span::styled(
+                    format!("[{}]", warning.short_label()),
+                    t.status_warn.add_modifier(Modifier::BOLD),
+                ));
+            }
+
             if !endpoint_str.is_empty() {
                 spans.push(Span::styled("  ", t.muted));
                 spans.push(Span::styled(endpoint_str, t.accent));
@@ -132,23 +156,16 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 spans.push(Span::styled("  ", t.muted));
                 spans.push(Span::styled(format!("({bin_short})"), t.muted));
             }
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(format!("[{}]", chunk.status), status_style));
             spans.push(Span::styled(
                 format!("  {:.0}%", chunk.confidence * 100.0),
                 t.muted,
             ));
-            if let Some(annotation) = approval_annotation(chunk) {
-                let annotation_style = match annotation.kind {
-                    ApprovalAnnotationKind::AutoApproved => t.status_ok,
-                    ApprovalAnnotationKind::RequiresReview => t.status_warn,
-                    ApprovalAnnotationKind::Reviewed => t.muted,
-                };
-                spans.push(Span::styled("  ", t.muted));
-                spans.push(Span::styled(annotation.short_label, annotation_style));
-            }
             if chunk.hit_count > 1 {
                 spans.push(Span::styled(format!("  {}x", chunk.hit_count), t.accent));
+            }
+            if let Some(intent) = agent_intent(chunk) {
+                spans.push(Span::styled("  Agent intent: ", t.muted));
+                spans.push(Span::styled(intent, name_style));
             }
 
             let mut line = Line::from(spans);
@@ -180,7 +197,7 @@ pub fn draw_detail_popup(
 ) {
     let t = theme;
     let popup_width = (area.width * 4 / 5).min(area.width.saturating_sub(4));
-    let popup_height = 22u16.min(area.height.saturating_sub(4));
+    let popup_height = 26u16.min(area.height.saturating_sub(4));
     let popup_area = centered_rect(popup_width, popup_height, area);
 
     frame.render_widget(Clear, popup_area);
@@ -193,7 +210,10 @@ pub fn draw_detail_popup(
     };
 
     let block = Block::default()
-        .title(Span::styled(format!(" {} ", chunk.rule_name), t.heading))
+        .title(Span::styled(
+            format!(" {} ", proposal_headline(chunk)),
+            t.heading,
+        ))
         .borders(Borders::ALL)
         .border_style(t.accent)
         .padding(Padding::new(1, 1, 0, 0));
@@ -209,15 +229,47 @@ pub fn draw_detail_popup(
         ]),
     ];
 
-    if let Some(annotation) = approval_annotation(chunk) {
-        let annotation_style = match annotation.kind {
-            ApprovalAnnotationKind::AutoApproved => t.status_ok.add_modifier(Modifier::BOLD),
-            ApprovalAnnotationKind::RequiresReview => t.status_warn.add_modifier(Modifier::BOLD),
-            ApprovalAnnotationKind::Reviewed => t.muted,
+    if let Some(validation) = validation_badge(chunk) {
+        let validation_style = match validation.kind {
+            ValidationBadgeKind::Clear => t.status_ok.add_modifier(Modifier::BOLD),
+            ValidationBadgeKind::Review => t.status_warn.add_modifier(Modifier::BOLD),
         };
+        let mut validation_lines = validation.detail_label.lines();
+        if let Some(first) = validation_lines.next() {
+            lines.push(Line::from(vec![
+                Span::styled("Validation: ", t.muted),
+                Span::styled(first, validation_style),
+            ]));
+        }
+        for line in validation_lines {
+            lines.push(Line::from(vec![
+                Span::raw("            "),
+                Span::styled(line, validation_style),
+            ]));
+        }
+    }
+
+    if let Some(warning) = proposal_scope_warning(chunk) {
         lines.push(Line::from(vec![
-            Span::styled("Review:     ", t.muted),
-            Span::styled(annotation.detail_label, annotation_style),
+            Span::styled("Scope:      ", t.muted),
+            Span::styled(
+                warning.detail_label(),
+                t.status_warn.add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    if let Some(intent) = agent_intent(chunk) {
+        lines.push(Line::from(vec![
+            Span::styled("Agent intent: ", t.muted),
+            Span::styled(intent, t.text),
+        ]));
+    }
+
+    if let Some(guidance) = rejection_guidance(chunk) {
+        lines.push(Line::from(vec![
+            Span::styled("Reviewer guidance: ", t.muted),
+            Span::styled(guidance, t.status_err.add_modifier(Modifier::BOLD)),
         ]));
     }
 
@@ -280,15 +332,6 @@ pub fn draw_detail_popup(
                 ]));
             }
         }
-    }
-
-    // Rationale.
-    if !chunk.rationale.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("Rationale:  ", t.muted),
-            Span::styled(&chunk.rationale, t.text),
-        ]));
     }
 
     // Security notes.
@@ -411,15 +454,16 @@ pub fn draw_approve_all_popup(
         let prefix_len = 5;
         let sep_len = 2;
         let budget = inner_width.saturating_sub(prefix_len + sep_len);
-        let (name_str, ep_str) = if chunk.rule_name.len() + endpoint_str.len() > budget {
+        let headline = proposal_headline(chunk);
+        let (name_str, ep_str) = if headline.len() + endpoint_str.len() > budget {
             let ep_budget = endpoint_str.len().min(budget / 2);
             let name_budget = budget.saturating_sub(ep_budget);
             (
-                truncate_str(&chunk.rule_name, name_budget),
+                truncate_str(headline, name_budget),
                 truncate_str(&endpoint_str, ep_budget),
             )
         } else {
-            (chunk.rule_name.clone(), endpoint_str)
+            (headline.to_string(), endpoint_str)
         };
 
         let mut row_spans = vec![
@@ -460,76 +504,122 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     }
 }
 
-#[derive(Clone, Copy)]
-enum ApprovalAnnotationKind {
-    AutoApproved,
-    RequiresReview,
-    Reviewed,
+const UNNAMED_PROPOSAL: &str = "Unnamed policy proposal";
+
+fn proposal_headline(chunk: &PolicyChunk) -> &str {
+    let headline = chunk.rule_name.trim();
+    if headline.is_empty() {
+        UNNAMED_PROPOSAL
+    } else {
+        headline
+    }
 }
 
-struct ApprovalAnnotation {
-    kind: ApprovalAnnotationKind,
-    short_label: String,
-    detail_label: String,
+fn agent_intent(chunk: &PolicyChunk) -> Option<&str> {
+    non_empty_trimmed(&chunk.rationale)
 }
 
-fn approval_annotation(chunk: &PolicyChunk) -> Option<ApprovalAnnotation> {
+fn rejection_guidance(chunk: &PolicyChunk) -> Option<&str> {
+    if chunk.status != "rejected" {
+        return None;
+    }
+    non_empty_trimmed(&chunk.rejection_reason)
+}
+
+fn non_empty_trimmed(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ValidationBadgeKind {
+    Clear,
+    Review,
+}
+
+struct ValidationBadge<'a> {
+    kind: ValidationBadgeKind,
+    short_label: &'static str,
+    detail_label: &'a str,
+}
+
+fn validation_badge(chunk: &PolicyChunk) -> Option<ValidationBadge<'_>> {
     let validation = chunk.validation_result.trim();
     if validation.is_empty() {
         return None;
     }
 
-    if validation == "prover: no new findings" {
-        if chunk.status == "approved" {
-            return Some(ApprovalAnnotation {
-                kind: ApprovalAnnotationKind::AutoApproved,
-                short_label: "auto-approved".to_string(),
-                detail_label: "proposal was auto-approved; no additional risk detected".to_string(),
-            });
-        }
+    let (kind, short_label) = if validation == "prover: no new findings" {
+        (ValidationBadgeKind::Clear, "validation: clear")
+    } else {
+        (ValidationBadgeKind::Review, "validation: review")
+    };
 
-        return Some(ApprovalAnnotation {
-            kind: ApprovalAnnotationKind::RequiresReview,
-            short_label: "review required".to_string(),
-            detail_label: "rule requires review; no additional risk detected".to_string(),
-        });
-    }
-
-    let issues = validation_issue_summary(validation);
-    if chunk.status == "approved" {
-        return Some(ApprovalAnnotation {
-            kind: ApprovalAnnotationKind::Reviewed,
-            short_label: "reviewed".to_string(),
-            detail_label: format!("rule was approved after review; possible issues: {issues}"),
-        });
-    }
-
-    Some(ApprovalAnnotation {
-        kind: ApprovalAnnotationKind::RequiresReview,
-        short_label: "review required".to_string(),
-        detail_label: format!(
-            "rule was not auto-approved and requires review; possible issues: {issues}"
-        ),
+    Some(ValidationBadge {
+        kind,
+        short_label,
+        detail_label: validation,
     })
 }
 
-fn validation_issue_summary(validation: &str) -> String {
-    let mut issues = Vec::new();
-    for line in validation.lines().skip(1) {
-        let Some((category, _)) = line.trim().split_once(':') else {
-            continue;
-        };
-        let label = category.trim().replace('_', " ");
-        if !label.is_empty() && !issues.contains(&label) {
-            issues.push(label);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScopeWarning {
+    L4Only,
+    RestWithoutMethodPath,
+}
+
+impl ScopeWarning {
+    fn short_label(self) -> &'static str {
+        match self {
+            Self::L4Only => "broad L4",
+            Self::RestWithoutMethodPath => "broad REST",
         }
     }
 
-    if issues.is_empty() {
-        validation.lines().next().unwrap_or(validation).to_string()
-    } else {
-        issues.join(", ")
+    fn detail_label(self) -> &'static str {
+        match self {
+            Self::L4Only => "Broad L4 access has no HTTP method or path enforcement.",
+            Self::RestWithoutMethodPath => {
+                "Broad REST access lacks an explicit method and path on every allow rule."
+            }
+        }
     }
+}
+
+fn proposal_scope_warning(chunk: &PolicyChunk) -> Option<ScopeWarning> {
+    let mut warning = None;
+    let endpoints = chunk.proposed_rule.as_ref()?.endpoints.iter();
+    for endpoint in endpoints {
+        match endpoint_scope_warning(endpoint) {
+            Some(ScopeWarning::L4Only) => return Some(ScopeWarning::L4Only),
+            Some(rest_warning) => warning = Some(rest_warning),
+            None => {}
+        }
+    }
+    warning
+}
+
+fn endpoint_scope_warning(endpoint: &NetworkEndpoint) -> Option<ScopeWarning> {
+    let protocol = endpoint.protocol.trim();
+    if protocol.is_empty() {
+        return Some(ScopeWarning::L4Only);
+    }
+    if !protocol.eq_ignore_ascii_case("rest") {
+        return None;
+    }
+
+    let has_narrow_method_path = !endpoint.rules.is_empty()
+        && endpoint.rules.iter().all(|rule| {
+            rule.allow.as_ref().is_some_and(|allow| {
+                is_narrow_scope_component(&allow.method) && is_narrow_scope_component(&allow.path)
+            })
+        });
+    (!has_narrow_method_path).then_some(ScopeWarning::RestWithoutMethodPath)
+}
+
+fn is_narrow_scope_component(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty() && value != "*" && value != "**" && value != "/**"
 }
 
 fn format_endpoint_summary(endpoint: &NetworkEndpoint) -> String {
@@ -692,4 +782,191 @@ fn format_short_time(epoch_ms: i64) -> String {
     let minutes = (time_of_day % 3600) / 60;
     let seconds = time_of_day % 60;
     format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openshell_core::proto::{L7Rule, NetworkPolicyRule};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn chunk_with_endpoint(endpoint: NetworkEndpoint) -> PolicyChunk {
+        PolicyChunk {
+            proposed_rule: Some(NetworkPolicyRule {
+                endpoints: vec![endpoint],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn rest_endpoint(method: &str, path: &str) -> NetworkEndpoint {
+        NetworkEndpoint {
+            protocol: "rest".to_string(),
+            rules: vec![L7Rule {
+                allow: Some(L7Allow {
+                    method: method.to_string(),
+                    path: path.to_string(),
+                    ..Default::default()
+                }),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn proposal_headline_uses_trimmed_rule_name_and_fallback() {
+        let named = PolicyChunk {
+            rule_name: "  github contents write  ".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(proposal_headline(&named), "github contents write");
+
+        assert_eq!(proposal_headline(&PolicyChunk::default()), UNNAMED_PROPOSAL);
+    }
+
+    #[test]
+    fn agent_intent_uses_trimmed_rationale() {
+        let chunk = PolicyChunk {
+            rationale: "  update one documentation file  ".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(agent_intent(&chunk), Some("update one documentation file"));
+        assert_eq!(agent_intent(&PolicyChunk::default()), None);
+    }
+
+    #[test]
+    fn validation_badge_distinguishes_clear_and_review_results() {
+        let clear = PolicyChunk {
+            validation_result: "prover: no new findings".to_string(),
+            ..Default::default()
+        };
+        let badge = validation_badge(&clear).expect("validation badge");
+        assert_eq!(badge.kind, ValidationBadgeKind::Clear);
+        assert_eq!(badge.short_label, "validation: clear");
+
+        let findings = PolicyChunk {
+            validation_result: "prover: findings\ncapability_expansion: PUT".to_string(),
+            ..Default::default()
+        };
+        let badge = validation_badge(&findings).expect("validation badge");
+        assert_eq!(badge.kind, ValidationBadgeKind::Review);
+        assert_eq!(badge.detail_label, findings.validation_result);
+
+        assert!(validation_badge(&PolicyChunk::default()).is_none());
+    }
+
+    #[test]
+    fn rejection_guidance_only_surfaces_for_rejected_chunks() {
+        let mut chunk = PolicyChunk {
+            status: "pending".to_string(),
+            rejection_reason: "  scope to docs paths  ".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(rejection_guidance(&chunk), None);
+
+        chunk.status = "rejected".to_string();
+        assert_eq!(rejection_guidance(&chunk), Some("scope to docs paths"));
+
+        chunk.rejection_reason.clear();
+        assert_eq!(rejection_guidance(&chunk), None);
+    }
+
+    #[test]
+    fn scope_warning_flags_l4_and_unscoped_rest_endpoints() {
+        assert_eq!(
+            endpoint_scope_warning(&NetworkEndpoint::default()),
+            Some(ScopeWarning::L4Only)
+        );
+
+        let rest = NetworkEndpoint {
+            protocol: "rest".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            endpoint_scope_warning(&rest),
+            Some(ScopeWarning::RestWithoutMethodPath)
+        );
+        assert_eq!(
+            endpoint_scope_warning(&rest_endpoint("PUT", "")),
+            Some(ScopeWarning::RestWithoutMethodPath)
+        );
+        assert_eq!(
+            endpoint_scope_warning(&rest_endpoint("*", "/repos/org/repo/**")),
+            Some(ScopeWarning::RestWithoutMethodPath)
+        );
+        assert_eq!(
+            endpoint_scope_warning(&rest_endpoint("GET", "/**")),
+            Some(ScopeWarning::RestWithoutMethodPath)
+        );
+    }
+
+    #[test]
+    fn scope_warning_accepts_explicit_rest_method_and_path() {
+        assert_eq!(
+            endpoint_scope_warning(&rest_endpoint("PUT", "/repos/org/repo/contents/docs/**")),
+            None
+        );
+
+        let graphql = NetworkEndpoint {
+            protocol: "graphql".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(endpoint_scope_warning(&graphql), None);
+    }
+
+    #[test]
+    fn proposal_scope_warning_prioritizes_l4_access() {
+        let chunk = PolicyChunk {
+            proposed_rule: Some(NetworkPolicyRule {
+                endpoints: vec![rest_endpoint("PUT", ""), NetworkEndpoint::default()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(proposal_scope_warning(&chunk), Some(ScopeWarning::L4Only));
+
+        assert_eq!(
+            proposal_scope_warning(&chunk_with_endpoint(rest_endpoint("GET", "/v1/items"))),
+            None
+        );
+    }
+
+    #[test]
+    fn detail_popup_renders_proposal_review_metadata() {
+        let endpoint = NetworkEndpoint {
+            host: "api.example.com".to_string(),
+            port: 443,
+            ..Default::default()
+        };
+        let mut chunk = chunk_with_endpoint(endpoint);
+        chunk.status = "rejected".to_string();
+        chunk.rule_name = "example API access".to_string();
+        chunk.rationale = "Update docs".to_string();
+        chunk.validation_result = "prover: findings".to_string();
+        chunk.rejection_reason = "Use a narrower path".to_string();
+        chunk.hit_count = 1;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                draw_detail_popup(frame, &chunk, frame.size(), &crate::theme::Theme::dark());
+            })
+            .expect("draw detail popup");
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("example API access"));
+        assert!(rendered.contains("Validation: prover: findings"));
+        assert!(rendered.contains("Broad L4 access"));
+        assert!(rendered.contains("Agent intent: Update docs"));
+        assert!(rendered.contains("Reviewer guidance: Use a narrower path"));
+    }
 }

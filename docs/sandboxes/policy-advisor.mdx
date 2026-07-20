@@ -183,6 +183,12 @@ Review pending chunks from the host:
 openshell rule get <sandbox-name> --status pending
 ```
 
+To review proposals in the TUI, run `openshell term`, open a sandbox, and press `r`. The policy proposal inbox refreshes the active sandbox about every two seconds. Each row uses the rule name as its headline and shows the proposal status, validation status, endpoint, and agent-supplied intent. Press `Enter` to inspect the full proposal and any reviewer guidance stored with a rejection.
+
+The `[broad L4]` badge identifies access without HTTP method or path enforcement. The `[broad REST]` badge identifies a REST proposal with no explicit allow rules or with an allow rule that lacks an explicit method or path. Review these proposals as broader than an L7 REST proposal with both constraints.
+
+Use `a` to approve the selected proposal, `x` to reject or revoke it, and `A` to open the approve-all confirmation. These controls modify only the selected sandbox's draft policy.
+
 Under `auto` mode, only proposals the prover flagged appear here; empty-delta proposals are already approved and visible under `--status approved` with the auto-approval audit fields described in [Approval Modes](#approval-modes). Under `manual` mode, every proposal — regardless of prover verdict — shows up as pending.
 
 The output shows the chunk ID, status, rationale, binary, and endpoint summary. For L7 proposals, the endpoint summary includes the protocol, method, and path:
